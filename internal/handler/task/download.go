@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"path"
 	"strconv"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"github.com/zkep/my-geektime/internal/types/geek"
 	"github.com/zkep/my-geektime/internal/types/task"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 var (
@@ -104,6 +106,25 @@ func iterators(ctx context.Context, loaded bool) error {
 }
 
 func worker(ctx context.Context, x *model.Task) error {
+	courseTaskID := x.TaskPid
+	if x.TaskType == service.TASK_TYPE_PRODUCT {
+		courseTaskID = x.TaskId
+	}
+	done := service.TrackCourseCacheWorker(courseTaskID)
+	defer done()
+
+	// The cache may have been refreshed or archived since this task was queued.
+	var current model.Task
+	err := global.DB.WithContext(ctx).Where("id = ? AND status = ? AND deleted_at = 0", x.Id, service.TASK_STATUS_PENDING).
+		First(&current).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	x = &current
+
 	switch x.TaskType {
 	case service.TASK_TYPE_PRODUCT:
 		return doProduct(ctx, x)
@@ -126,7 +147,7 @@ func doProduct(_ context.Context, x *model.Task) error {
 	for _, item := range service.ALLStatus {
 		var itemCount int64
 		if err := global.DB.Model(&model.Task{}).
-			Where("task_pid = ?", x.TaskId).
+			Where("task_pid = ? AND deleted_at = 0", x.TaskId).
 			Where("status = ?", item).
 			Count(&itemCount).Error; err != nil {
 			global.LOG.Error("worker count", zap.Error(err), zap.String("taskId", x.TaskId))

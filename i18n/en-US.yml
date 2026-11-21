@@ -21,6 +21,7 @@ product:
   no_valid_cookie: "Geek time cookie is invalid, please refresh the cookie!"
   api_busy: "The service is busy, please try again later！"
   no_exists_pid: "Non-existent course ID"
+  cache_in_progress: "This course is being cached. Try again once the current task finishes."
 
 tasks:
   illegal_operation: "After successfully caching all courses, it can be operated. Currently caching courses （%d/%d）"

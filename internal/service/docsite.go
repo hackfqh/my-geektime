@@ -87,7 +87,7 @@ type ArticleInfo struct {
 func (g *GoldmarkDocGenerator) MakeDocsite(ctx context.Context, taskId, title, introHTML string) (string, error) {
 	var tasks []model.Task
 	if err := global.DB.WithContext(ctx).Model(&model.Task{}).
-		Where(&model.Task{TaskPid: taskId}).
+		Where("task_pid = ? AND deleted_at = 0", taskId).
 		Order("id asc").
 		Find(&tasks).Error; err != nil {
 		return "", fmt.Errorf("query tasks failed: %w", err)
@@ -396,7 +396,7 @@ func (g *GoldmarkDocGenerator) MakeDocsite(ctx context.Context, taskId, title, i
 func (g *GoldmarkDocGenerator) MakeDocsiteLocal(ctx context.Context, taskId, group, title, introHTML string, commentLen int) error {
 	var tasks []model.Task
 	if err := global.DB.Model(&model.Task{}).
-		Where(&model.Task{TaskPid: taskId}).
+		Where("task_pid = ? AND deleted_at = 0", taskId).
 		Order("id asc").
 		Find(&tasks).Error; err != nil {
 		return fmt.Errorf("query tasks failed: %w", err)
@@ -648,7 +648,7 @@ func (g *GoldmarkDocGenerator) MakeDocsiteLocal(ctx context.Context, taskId, gro
 func (g *GoldmarkDocGenerator) MakeDocArchive(ctx context.Context, taskId, _ string, introHTML string) (*bytes.Buffer, error) {
 	var tasks []model.Task
 	if err := global.DB.WithContext(ctx).Model(&model.Task{}).
-		Where(&model.Task{TaskPid: taskId}).
+		Where("task_pid = ? AND deleted_at = 0", taskId).
 		Order("id asc").
 		Find(&tasks).Error; err != nil {
 		return nil, fmt.Errorf("query tasks failed: %w", err)

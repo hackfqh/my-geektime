@@ -2,6 +2,7 @@ package v2
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/gin-gonic/gin"
@@ -12,7 +13,6 @@ import (
 	"github.com/zkep/my-geektime/internal/types/sys_dict"
 	"github.com/zkep/my-geektime/internal/types/task"
 	"github.com/zkep/my-geektime/libs/utils"
-	"gorm.io/gorm"
 )
 
 type Product struct{}
@@ -32,13 +32,12 @@ func (p *Product) Download(c *gin.Context) {
 		global.FAIL(c, "product.no_cookie")
 		return
 	}
-	articlesMap := make(map[int64]*model.Article, 10)
-	ids := make([]int64, 0, 1)
 	if req.Pid <= 0 {
 		global.FAIL(c, "product.no_exists_pid")
 		return
 	}
-	resp, err := service.GetArticles(c, accessToken,
+	ctx := c.Request.Context()
+	resp, err := service.GetArticles(ctx, accessToken,
 		geek.ArticlesListRequest{
 			Cid:   fmt.Sprintf("%d", req.Pid),
 			Order: "earliest",
@@ -49,27 +48,9 @@ func (p *Product) Download(c *gin.Context) {
 		global.FailWithError(c, err)
 		return
 	}
-	if len(resp.Data.List) == 0 {
+	if resp.Code != 0 || len(resp.Data.List) == 0 {
 		global.FAIL(c, "product.api_busy")
 		return
-	}
-	for _, v := range resp.Data.List {
-		if v.ID <= 0 || v.ArticleTitle == "" {
-			continue
-		}
-		ids = append(ids, v.ID)
-		itemRaw, _ := json.Marshal(v)
-		info := &model.Article{
-			Aid:   fmt.Sprintf("%d", v.ID),
-			Pid:   fmt.Sprintf("%d", req.Pid),
-			Title: v.ArticleTitle,
-			Cover: v.ArticleCover,
-			Raw:   itemRaw,
-		}
-		if v.VideoCover != "" && info.Cover == "" {
-			info.Cover = v.VideoCover
-		}
-		articlesMap[v.ID] = info
 	}
 	var product model.Product
 	if err := global.DB.Model(&model.Product{}).
@@ -78,7 +59,7 @@ func (p *Product) Download(c *gin.Context) {
 		return
 	}
 	if product.Pid == "" {
-		ret, err := service.GetColumnInfo(c, accessToken,
+		ret, err := service.GetColumnInfo(ctx, accessToken,
 			geek.ColumnRequest{ProductID: req.Pid, WithRecommendArticle: true})
 		if err != nil {
 			global.FAIL(c, "fail.msg", err.Error())
@@ -87,17 +68,6 @@ func (p *Product) Download(c *gin.Context) {
 		product.Title = ret.Data.Title
 		product.Cover = ret.Data.Cover.Square
 		product.Raw, _ = json.Marshal(ret.Data)
-	}
-	if len(articlesMap) == 0 {
-		var articles []*model.Article
-		if err := global.DB.Model(&model.Article{}).
-			Where("aid IN ?", ids).Find(&articles).Error; err != nil {
-			global.FAIL(c, "fail.msg", err.Error())
-			return
-		}
-		for _, v := range articles {
-			articlesMap[v.Id] = v
-		}
 	}
 	jobId := utils.HalfUUID()
 	job := &model.Task{
@@ -112,40 +82,28 @@ func (p *Product) Download(c *gin.Context) {
 		OtherGroup: product.OtherGroup,
 		OtherTag:   product.OtherTag,
 	}
-	tasks := make([]*model.Task, 0, len(ids))
-	for _, id := range ids {
-		var (
-			raw      []byte
-			otherId  string
-			taskName string
-			cover    string
-		)
-		if article, ok := articlesMap[id]; !ok {
-			info, err := service.GetArticleInfo(c, accessToken, geek.ArticlesInfoRequest{Id: id})
-			if err != nil {
-				global.FAIL(c, "fail.msg", err.Error())
-				return
-			}
-			var m geek.ArticleInfoRaw
-			if err = json.Unmarshal(info.Raw, &m); err != nil {
-				global.FAIL(c, "fail.msg", err.Error())
-				return
-			}
-			raw = m.Data
-			otherId = fmt.Sprintf("%d", info.Data.Info.ID)
-			taskName = info.Data.Info.Title
-			cover = info.Data.Info.Cover.Default
-		} else {
-			raw = article.Raw
-			otherId = article.Aid
-			taskName = article.Title
-			cover = article.Cover
+	seen := make(map[int64]bool, len(resp.Data.List))
+	tasks := make([]*model.Task, 0, len(resp.Data.List))
+	complete := !resp.Data.Page.More
+	for _, article := range resp.Data.List {
+		if article.ID <= 0 || article.ArticleTitle == "" {
+			complete = false
+			continue
+		}
+		if seen[article.ID] {
+			continue
+		}
+		seen[article.ID] = true
+		raw, _ := json.Marshal(article)
+		cover := article.ArticleCover
+		if cover == "" {
+			cover = article.VideoCover
 		}
 		item := model.Task{
 			TaskPid:    jobId,
 			TaskId:     utils.HalfUUID(),
-			OtherId:    otherId,
-			TaskName:   taskName,
+			OtherId:    fmt.Sprintf("%d", article.ID),
+			TaskName:   article.ArticleTitle,
 			TaskType:   service.TASK_TYPE_ARTICLE,
 			Cover:      cover,
 			Raw:        raw,
@@ -160,6 +118,11 @@ func (p *Product) Download(c *gin.Context) {
 		tasks = append(tasks, &item)
 	}
 	count := len(tasks)
+	if count == 0 {
+		global.FAIL(c, "product.api_busy")
+		return
+	}
+	complete = complete && int64(count) >= resp.Data.Page.Count
 	statistics := task.TaskStatistics{
 		Count: count,
 		Items: map[int]int{
@@ -173,17 +136,11 @@ func (p *Product) Download(c *gin.Context) {
 	if global.CONF.Site.Download {
 		job.Bstatus = service.TASK_STATUS_PENDING
 	}
-	err = global.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(job).Error; err != nil {
-			return err
-		}
-		for _, x := range tasks {
-			if err := tx.Create(x).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	jobId, err = service.SaveCourseCache(ctx, job, tasks, complete)
+	if errors.Is(err, service.ErrCourseCacheInProgress) {
+		global.FAIL(c, "product.cache_in_progress")
+		return
+	}
 	if err != nil {
 		global.FAIL(c, "fail.msg", err.Error())
 		return

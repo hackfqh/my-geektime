@@ -38,6 +38,9 @@ var ALLStatus = []int{
 }
 
 func SyncProductStatistics(x *model.Task) (task.TaskStatistics, int32) {
+	courseCacheMu.Lock()
+	defer courseCacheMu.Unlock()
+
 	var statistics task.TaskStatistics
 	if len(x.Statistics) > 0 {
 		_ = json.Unmarshal(x.Statistics, &statistics)
@@ -115,6 +118,9 @@ func BatchSyncProductStatistics(tasks []*model.Task) map[string]task.TaskStatist
 	if len(taskIds) == 0 {
 		return result
 	}
+
+	courseCacheMu.Lock()
+	defer courseCacheMu.Unlock()
 
 	type statusCount struct {
 		TaskPid string `gorm:"column:task_pid"`
