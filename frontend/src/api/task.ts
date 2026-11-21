@@ -124,7 +124,7 @@ export interface TaskInfo {
 export interface TaskInfoResponse {
   task: TaskInfo
   article?: any
-  message?: any
+  message?: { object?: string; text?: string; doc?: string }
   play_url?: string
 }
 

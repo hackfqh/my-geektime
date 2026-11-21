@@ -29,6 +29,15 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
   const taskInfo = taskInfoResponse?.task || null
   const article = taskInfoResponse?.article || null
   const playUrl = taskInfoResponse?.play_url
+  const [localAudioFailed, setLocalAudioFailed] = useState(false)
+  const downloadedObject = taskInfoResponse?.message?.object
+  // The storage API returns an unescaped file path, including any literal # in the filename.
+  const localAudioPath = downloadedObject?.toLowerCase().endsWith('.mp3')
+    ? new URL(encodeURI(downloadedObject).replace(/#/g, '%23'), window.location.origin).pathname
+    : null
+  const isAudio = !taskInfo?.is_video && !article?.video?.hls_medias?.length &&
+    !article?.video_preview?.medias?.length && Boolean(localAudioPath || article?.audio?.url)
+  const useLocalAudio = isAudio && localAudioPath !== null && !localAudioFailed
   const [showFloatingPlayer, setShowFloatingPlayer] = useState(false)
   const [floatingPosition, setFloatingPosition] = useState({ x: 20, y: 80 })
   const [floatingSize, setFloatingSize] = useState({ width: 300, height: 220 })
@@ -51,7 +60,10 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
   const videoContainerRef = useRef<HTMLDivElement>(null)
   const floatingPlayerRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
-  const videoRef = useRef<HTMLVideoElement>(null)
+  const mediaRef = useRef<HTMLMediaElement | null>(null)
+  const setMediaRef = useCallback((element: HTMLMediaElement | null) => {
+    mediaRef.current = element
+  }, [])
   const prevTaskIdRef = useRef<string | null>(null)
 
   const loadComments = async (aid: string, page: number) => {
@@ -149,6 +161,7 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
       
       prevTaskIdRef.current = taskId
       setLoading(true)
+      setLocalAudioFailed(false)
       setShowFloatingPlayer(false)
       setShowScrollTop(false)
       setComments([])
@@ -156,9 +169,9 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
       if (contentRef.current) {
         contentRef.current.scrollTop = 0
       }
-      if (videoRef.current) {
-        videoRef.current.currentTime = 0
-        videoRef.current.pause()
+      if (mediaRef.current) {
+        mediaRef.current.currentTime = 0
+        mediaRef.current.pause()
       }
       getTaskInfo(taskId)
         .then((data) => {
@@ -178,32 +191,28 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
   }, [show, taskId])
 
   useEffect(() => {
-    const handleScroll = () => {
-      if (!videoContainerRef.current || !contentRef.current) return
-      
-      const container = videoContainerRef.current
-      const rect = container.getBoundingClientRect()
-      const contentElement = contentRef.current
-      
-      if (rect.bottom < 100) {
-        setShowFloatingPlayer(true)
-      } else if (rect.bottom > 200) {
-        setShowFloatingPlayer(false)
-      }
-
-      if (contentElement.scrollTop > 300) {
-        setShowScrollTop(true)
-      } else {
-        setShowScrollTop(false)
-      }
-    }
-
     const contentElement = contentRef.current
-    if (contentElement) {
-      contentElement.addEventListener('scroll', handleScroll)
-      return () => contentElement.removeEventListener('scroll', handleScroll)
+    if (!contentElement) return
+
+    const handleScroll = () => {
+      const container = videoContainerRef.current
+      if (!container) return
+
+      if (!isAudio) {
+        const { bottom } = container.getBoundingClientRect()
+        if (bottom < 100) {
+          setShowFloatingPlayer(true)
+        } else if (bottom > 200) {
+          setShowFloatingPlayer(false)
+        }
+      }
+
+      setShowScrollTop(contentElement.scrollTop > 300)
     }
-  }, [taskInfo])
+
+    contentElement.addEventListener('scroll', handleScroll)
+    return () => contentElement.removeEventListener('scroll', handleScroll)
+  }, [isAudio, show, taskInfo])
 
   const scrollToTop = () => {
     if (contentRef.current) {
@@ -317,7 +326,7 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
   
   useEffect(() => {
     if (prevFloatingRef.current !== showFloatingPlayer) {
-      const video = videoRef.current
+      const video = mediaRef.current
       if (video) {
         video.currentTime = videoState.currentTime
         if (videoState.isPlaying) {
@@ -329,7 +338,7 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
   }, [showFloatingPlayer, videoState])
 
   const saveVideoState = useCallback(() => {
-    const video = videoRef.current
+    const video = mediaRef.current
     if (video) {
       setVideoState({
         currentTime: video.currentTime,
@@ -339,7 +348,7 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
   }, [])
 
   const handleVideoTimeUpdate = useCallback(() => {
-    const video = videoRef.current
+    const video = mediaRef.current
     if (video) {
       setVideoState(prev => ({
         ...prev,
@@ -366,9 +375,16 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
     }
   }
 
-  const getVideoSrc = () => {
+  const getMediaSrc = () => {
     if (!taskInfo) return null
-    if (playUrl) return playUrl
+    if (useLocalAudio) return localAudioPath
+    if (playUrl) {
+      if (isAudio) {
+        const { pathname, search } = new URL(playUrl, window.location.origin)
+        if (pathname === '/v2/task/play.m3u8') return pathname + search
+      }
+      return playUrl
+    }
     if (article?.video?.hls_medias?.length) {
       const last = article.video.hls_medias[article.video.hls_medias.length - 1]
       return last.url
@@ -381,17 +397,15 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
     return null
   }
 
-  const videoSrc = getVideoSrc()
+  const mediaSrc = getMediaSrc()
   const poster = article?.cover?.default
   
   useEffect(() => {
-    const video = videoRef.current
-    if (!video || !videoSrc) {
-      console.log('Video init skipped:', { hasVideo: !!video, hasSrc: !!videoSrc })
-      return
-    }
+    const video = mediaRef.current
+    if (!video || !mediaSrc || useLocalAudio) return
+    let active = true
     
-    console.log('Initializing video player with src:', videoSrc)
+    console.log('Initializing video player with src:', mediaSrc)
     
     const destroyHls = () => {
       if (hlsRef.current) {
@@ -403,16 +417,22 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
     destroyHls()
     
     const initHls = async () => {
-      if (!videoSrc.includes('.m3u8')) {
+      if (!mediaSrc.includes('.m3u8')) {
         console.log('Non-HLS video, setting src directly')
-        video.src = videoSrc
+        video.src = mediaSrc
         return
       }
       
+      if (isAudio && video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = mediaSrc
+        return
+      }
+
       console.log('HLS video detected')
       
       try {
         const HlsModule = await import('hls.js')
+        if (!active) return
         const Hls = HlsModule.default
         
         if (Hls.isSupported()) {
@@ -444,7 +464,7 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
             }
           })
           
-          hls.loadSource(videoSrc)
+          hls.loadSource(mediaSrc)
           hls.attachMedia(video)
           
           hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -453,23 +473,26 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
         } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
           // 如果 hls.js 不支持（比如 Safari），再尝试原生 HLS
           console.warn('hls.js not supported, falling back to native HLS')
-          video.src = videoSrc
+          video.src = mediaSrc
         } else {
           console.error('No HLS support in this browser')
         }
       } catch (err) {
         console.error('Failed to load hls.js:', err)
         // 如果 hls.js 加载失败，尝试原生 HLS
-        if (video.canPlayType('application/vnd.apple.mpegurl')) {
-          video.src = videoSrc
+        if (active && video.canPlayType('application/vnd.apple.mpegurl')) {
+          video.src = mediaSrc
         }
       }
     }
     
     initHls()
     
-    return destroyHls
-  }, [videoSrc, showFloatingPlayer])
+    return () => {
+      active = false
+      destroyHls()
+    }
+  }, [mediaSrc, isAudio, useLocalAudio, showFloatingPlayer, loading, show])
 
   if (!show) return null
 
@@ -494,8 +517,32 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
     }, 0)
   }
 
+  const renderMediaControls = (videoClassName: string) => {
+    const controls = {
+      ref: setMediaRef,
+      controls: true,
+      onTimeUpdate: handleVideoTimeUpdate,
+      onPlay: handleVideoPlay,
+      onPause: handleVideoPause,
+    }
+
+    if (isAudio) {
+      return (
+        <audio
+          {...controls}
+          className="w-full"
+          preload="metadata"
+          src={useLocalAudio ? localAudioPath : undefined}
+          onError={useLocalAudio ? () => setLocalAudioFailed(true) : undefined}
+        />
+      )
+    }
+
+    return <video {...controls} poster={poster} className={videoClassName} />
+  }
+
   const renderVideoPlayer = () => {
-    if (!videoSrc) return null
+    if (!mediaSrc) return null
 
     if (showFloatingPlayer) {
       return (
@@ -532,15 +579,7 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
             </div>
           </div>
           <div className="w-full bg-black flex items-center justify-center" style={{ height: 'calc(100% - 40px)' }}>
-            <video
-              ref={videoRef}
-              poster={poster}
-              controls
-              className="w-full h-full object-contain"
-              onTimeUpdate={handleVideoTimeUpdate}
-              onPlay={handleVideoPlay}
-              onPause={handleVideoPause}
-            />
+            {renderMediaControls('w-full h-full object-contain')}
           </div>
           <div
             className="absolute bottom-0 right-0 w-4 h-4 cursor-se-resize"
@@ -555,17 +594,14 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
     }
 
     return (
-      <div ref={videoContainerRef} className="bg-gray-100 rounded-lg p-4 flex justify-center">
-        <div className="max-w-full max-h-[50vh] rounded-lg overflow-hidden bg-black">
-          <video
-            ref={videoRef}
-            poster={poster}
-            controls
-            className="max-w-full max-h-[50vh] rounded-lg"
-            onTimeUpdate={handleVideoTimeUpdate}
-            onPlay={handleVideoPlay}
-            onPause={handleVideoPause}
-          />
+      <div
+        ref={videoContainerRef}
+        className={`flex justify-center bg-gray-100 p-4 ${
+          isAudio ? 'sticky top-0 z-30 -mx-4 -mt-4' : 'rounded-lg'
+        }`}
+      >
+        <div className={isAudio ? 'w-full' : 'max-w-full max-h-[50vh] rounded-lg overflow-hidden bg-black'}>
+          {renderMediaControls('max-w-full max-h-[50vh] rounded-lg')}
         </div>
       </div>
     )
@@ -579,15 +615,15 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
       />
       {renderScrollTopButton()}
       
-      {videoSrc && showFloatingPlayer && renderVideoPlayer()}
+      {mediaSrc && showFloatingPlayer && renderVideoPlayer()}
 
       <div 
-        className="fixed right-0 top-0 h-full bg-white shadow-2xl overflow-hidden z-[90] transition-all duration-300 ease-in-out"
+        className="fixed right-0 top-0 h-full max-w-full bg-white shadow-2xl overflow-hidden z-[90] transition-all duration-300 ease-in-out"
         style={{ width: drawerWidth }}
       >
         {/* 左侧拖拽手柄 */}
         <div
-          className="absolute left-0 top-0 bottom-0 w-4 cursor-col-resize hover:bg-primary-500/20 transition-colors group active:cursor-col-resize z-10"
+          className="hidden lg:block absolute left-0 top-0 bottom-0 w-4 cursor-col-resize hover:bg-primary-500/20 transition-colors group active:cursor-col-resize z-10"
           onMouseDown={handleDrawerResizeStart}
           title="拖动调整宽度"
         >
@@ -595,7 +631,7 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
         </div>
         <div className="h-full flex flex-col">
           <div className="flex items-center justify-between p-4 border-b border-primary-100 bg-gradient-to-r from-primary-50 to-primary-100">
-            <div className="flex-1">
+            <div className="min-w-0 flex-1 [overflow-wrap:anywhere]">
               <h3 className="font-semibold text-gray-800">
                 {taskInfo?.task_name || '加载中...'}
               </h3>
@@ -605,28 +641,28 @@ export const LessonDetail: React.FC<LessonDetailProps> = ({
             </div>
             <button
               onClick={onClose}
-              className="p-2 hover:bg-white/50 rounded-lg transition-colors ml-4"
+              className="ml-4 shrink-0 rounded-lg p-2 transition-colors hover:bg-white/50"
             >
               <X size={20} className="text-gray-500" />
             </button>
           </div>
 
-          <div ref={contentRef} className="flex-1 overflow-y-auto p-4">
+          <div ref={contentRef} className="flex-1 overflow-y-auto p-4 max-lg:overflow-x-hidden max-lg:overscroll-x-none">
             {loading ? (
               <div className="flex justify-center py-20">
                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-purple-500" />
               </div>
             ) : taskInfo ? (
               <div className="space-y-4">
-                {videoSrc && !showFloatingPlayer && renderVideoPlayer()}
-                {videoSrc && showFloatingPlayer && (
+                {mediaSrc && !showFloatingPlayer && renderVideoPlayer()}
+                {mediaSrc && showFloatingPlayer && (
                   <div className="bg-gray-100 rounded-lg p-4 flex justify-center">
                     <div className="w-full max-w-full h-[300px] bg-gray-200 rounded-lg flex items-center justify-center">
-                      <span className="text-gray-400">视频正在浮动窗口播放</span>
+                      <span className="text-gray-400">{isAudio ? '音频' : '视频'}正在浮动窗口播放</span>
                     </div>
                   </div>
                 )}
-                {!videoSrc && (
+                {!mediaSrc && (
                   <div ref={videoContainerRef} className="bg-gray-100 rounded-lg p-4 flex justify-center">
                     <div className="w-full max-w-full h-[300px] bg-gray-200 rounded-lg flex items-center justify-center">
                       <span className="text-gray-400">无视频</span>

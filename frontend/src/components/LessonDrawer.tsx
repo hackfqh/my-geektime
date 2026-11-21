@@ -170,9 +170,9 @@ export const LessonDrawer: React.FC<LessonDrawerProps> = ({
               <img
                 src={taskInfo.cover || selectedTask?.cover}
                 alt={taskInfo.task_name || selectedTask?.task_name}
-                className="w-32 h-32 rounded-lg object-cover shadow-md"
+                className="h-20 w-20 shrink-0 rounded-lg object-cover shadow-md sm:h-32 sm:w-32"
               />
-              <div className="flex-1">
+              <div className="min-w-0 flex-1 [overflow-wrap:anywhere]">
                 <h3 className="text-2xl font-bold text-gray-800 mb-2">{taskInfo.task_name || selectedTask?.task_name}</h3>
                 <p className="text-gray-600 mb-3">{taskInfo.subtitle || selectedTask?.subtitle}</p>
                 <div className="grid grid-cols-2 gap-2 text-sm">
